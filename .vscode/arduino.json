@@ -1,0 +1,6 @@
+{
+    "board": "esp32:esp32:m5stack-core-esp32",
+    "sketch": "M5StackCO2Checker.ino",
+    "output": "../build",
+    "port": "COM3"
+}

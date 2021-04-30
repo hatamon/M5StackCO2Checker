@@ -3,18 +3,17 @@
 #include <WiFiClientSecure.h>
 #include <ssl_client.h>
 #include <Ticker.h>
-#include <Ambient.h>
 #include <WebServer.h>
-#include <ESPmDNS.h>
+#include "Buffer.h"
+#include "CO2Data.h"
 
 const char* ssid = "decoNd4l90O1";
 const char* password = "NSiQA7Gm";
 
 const char* logFileName = "/co2buffer.txt";
-const char* tmpLogFileName = "/tmp.co2buffer.txt";
 
-unsigned int ambientChannelId = 34764;
-const char* ambientWriteKey = "bd1b9cb95274fd0a";
+const char* lineHost = "notify-api.line.me";
+const char* lineToken = "ymvMz7EY761RCA9CKKwcZBUSwsWnpde6j1WVHVrwieC";
 
 #define RX 16
 #define TX 17
@@ -31,144 +30,13 @@ const char* ambientWriteKey = "bd1b9cb95274fd0a";
 MHZ19 myMHZ19;
 HardwareSerial  mySerial(1);
 
-const char* ntpServer = "ntp.nict.jp";
-const long  gmtOffset_sec = 3600 * 9;
-const int   daylightOffset_sec = 0;
-
-class RingBuffer
-{
-  private:
-    int _startPos;
-    int _nextPos;
-    int _length;
-    static const int _bufferSize = 9 * 30;
-    int _buffer[_bufferSize];
-
-  private:
-    int ReadIntFromFile(File& f)
-    {
-      String s = "0";
-      while (f.available())
-      {
-        char ch = f.read();
-        if (ch == '\r') continue;
-        if (ch == '\n') break;
-        s.concat(ch);
-      }
-    
-      return s.toInt();
-    }
-    
-    void SaveCO2BufferToFile(const char* filename)
-    {
-      if (SD.exists(filename))
-      {
-        SD.remove(filename);
-      }
-    
-      File f = SD.open(filename, FILE_WRITE);
-      if (!f) return;
-      
-      f.println(_startPos);
-      f.println(_nextPos);
-      f.println(_length);
-      for (int i = 0; i < _bufferSize; i++)
-      {
-        f.println(_buffer[i]);
-      }
-
-      f.close();
-    }
-
-  public:
-    RingBuffer()
-    {
-      Clear();
-    }
-
-    void Clear()
-    {
-      _startPos = 0;
-      _nextPos = 0;
-      _length = 0;
-      for (int i = 0; i < _bufferSize; i++)
-      {
-        _buffer[i] = 0;
-      }
-    }
-
-    void Append(int value)
-    {
-      _buffer[_nextPos] = value;
-
-      _nextPos++;
-      if (_nextPos >= _bufferSize) _nextPos = 0;
-
-      if (_length >= _bufferSize)
-      {
-        _startPos++;
-        if (_startPos >= _bufferSize) _startPos = 0;
-      }
-      else
-      {
-        _length++;
-      }
-    }
-
-    int Length()
-    {
-      return _length;
-    }
-
-    int Get(int index)
-    {
-      if (index < 0 || index >= _length) return -1;
-
-      int realIndex = _startPos + index;
-      if (realIndex >= _bufferSize) realIndex -= _bufferSize;
-      return _buffer[realIndex];
-    }
-
-    void LoadCO2Buffer()
-    {
-      Clear();
-      const char* filename = SD.exists(tmpLogFileName) ? tmpLogFileName : logFileName;
-
-      if (!SD.exists(filename)) return;
-    
-      File f = SD.open(filename, FILE_READ);
-      if (!f) return;
-      
-      _startPos = ReadIntFromFile(f);
-      _nextPos = ReadIntFromFile(f);
-      _length = ReadIntFromFile(f);
-      for (int i = 0; i < _bufferSize; i++)
-      {
-        _buffer[i] = ReadIntFromFile(f);
-      }
-
-      f.close();
-    }
-    
-    void SaveCO2Buffer()
-    {
-    SaveCO2BufferToFile(tmpLogFileName);
-    SaveCO2BufferToFile(logFileName);
-    SD.remove(tmpLogFileName);
-    }
-};
-
-RingBuffer co2Buffer;
+Buffer co2Buffer(9 * 30);
 
 Ticker tickerCO2;
 Ticker tickerLCD;
 
-struct tm co2CheckStartTime;
 int currentCO2 = 0;
 int co2BufferUpdateCount = 0;
-
-Ambient ambient;
-WiFiClient ambientWiFiClient;
 
 WebServer server(80);
 
@@ -183,16 +51,25 @@ void logCO2(int co2)
   String str = "co2 " + co2Str;
   outputLog(str);
 
-  co2Buffer.Append(co2);
-
-  ambient.set(1, co2);
-  ambient.send();
+  CO2Data data;
+  data.co2 = co2;
+  struct tm datetime;
+  if (getLocalTime(&datetime))
+  {
+    data.year = datetime.tm_year + 1900;
+    data.mon = datetime.tm_mon + 1;
+    data.day = datetime.tm_mday;
+    data.hour = datetime.tm_hour;
+    data.min = datetime.tm_min;
+    data.sec = datetime.tm_sec;
+  }
+  co2Buffer.Append(data);
 
   co2BufferUpdateCount++;
   if (co2BufferUpdateCount >= SAVE_BUFFER_SPAN)
   {
     co2BufferUpdateCount = 0;
-    co2Buffer.SaveCO2Buffer();
+    co2Buffer.SaveCO2Buffer(logFileName);
   }
 }
 
@@ -201,11 +78,11 @@ void checkCO2()
   currentCO2 = myMHZ19.getCO2();
   logCO2(currentCO2);
 
-  if (currentCO2 > CO2_WARN_PPM)
+  if (currentCO2 > CO2_OVER_PPM)
   {
     String co2Str(currentCO2, DEC);
     String url = "http://" + WiFi.localIP().toString();
-    String str = "CO2 Warning : " + co2Str + "\n" + url;
+    String str = "CO2 Over : " + co2Str + "\n" + url;
     l_notify(str);
   }
 }
@@ -241,7 +118,7 @@ void serverHandleRoot()
       {\n\
         $.ajax({\n\
           type: 'GET',\n\
-          url: 'http://" + WiFi.localIP().toString() + "/getco2',\n\
+          url: '/getco2',\n\
           dataType: 'json'\n\
         }).then(function(data) {\n\
           $(\"#currentCO2\").text(data.currentCO2 + \" ppm\");\n\
@@ -249,7 +126,7 @@ void serverHandleRoot()
           var co2values = [];\n\
           var co2colors = [];\n\
           $(data.co2s).each(function(index, co2) {\n\
-            co2labels.push('');\n\
+            co2labels.push(co2.label);\n\
             co2values.push(co2.value);\n\
             co2colors.push(co2.color);\n\
           });\n\
@@ -276,17 +153,31 @@ void serverHandleGetCO2()
   String jsonHeader = "{\"co2s\":[";
   String jsonFooter = "], \"currentCO2\":" + String(currentCO2) + "}";
   String jsonBody = "";
-  int count = co2Buffer.Length();
+  int count = co2Buffer.GetSize();
   String delim = "";
+  int hour = 0;
   for (int i = max(0, count - 60); i < count; i++)
   {
-    int co2 = co2Buffer.Get(i);
-    String color = co2 > CO2_OVER_PPM ? "red" : (co2 > CO2_WARN_PPM ? "pink" : "blue");
-    jsonBody += delim + "{\"value\":" + String(co2Buffer.Get(i)) + ",\"color\":\"" + color + "\"}";
+    auto co2data = co2Buffer.Get(i);
+    String color = co2data.co2 > CO2_OVER_PPM ? "red" : (co2data.co2 > CO2_WARN_PPM ? "pink" : "blue");
+    String label;
+    if (hour != co2data.hour)
+    {
+      hour = co2data.hour;
+      label = String(co2data.hour);
+    }
+    jsonBody += delim + "{\"label\":\"" + label + "\",\"value\":" + String(co2data.co2) + ",\"color\":\"" + color + "\"}";
     delim = ",";
   }
 
   server.send(200, "application/json", jsonHeader + jsonBody + jsonFooter);
+}
+
+void serverHandleReset()
+{
+  co2Buffer.Clear();
+  co2Buffer.SaveCO2Buffer(logFileName);
+  server.send(200, "text/plain", "Reset.");
 }
 
 void serverHandleNotFound()
@@ -336,7 +227,11 @@ void setupWiFi()
 
 void setupTime()
 {
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  char* ntpServer = "ntp.nict.jp";
+  long  gmtOffset_sec = 3600 * 9;
+  int   daylightOffset_sec = 0;
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 }
 
 void setupTicker()
@@ -348,20 +243,6 @@ void setupTicker()
 void setupCO2Ticker()
 {
   tickerCO2.attach(CO2_CHECK_SPAN_SEC, checkCO2);
-
-  if (!getLocalTime(&co2CheckStartTime)) {
-    outputLog("Failed to obtain time");
-    return;
-  }
-
-  String YYYY(co2CheckStartTime.tm_year + 1900, DEC);
-  String MM(co2CheckStartTime.tm_mon+1, DEC);
-  String dd(co2CheckStartTime.tm_mday, DEC);
-  String hh(co2CheckStartTime.tm_hour, DEC);
-  String mm(co2CheckStartTime.tm_min, DEC);
-  String ss(co2CheckStartTime.tm_sec, DEC);
-  String startMsg = "CO2 check start : " + YYYY + "/" + MM + "/" + dd + " " + hh + ":" + mm + ":" + ss;
-  outputLog(startMsg);
 }
 
 void setupLCDTicker()
@@ -369,17 +250,11 @@ void setupLCDTicker()
   tickerLCD.once(LCD_TIMEOUT_SEC, lcdOff);
 }
 
-void setupAmbient()
-{
-  ambient.begin(ambientChannelId, ambientWriteKey, &ambientWiFiClient);
-}
-
 void setupServer()
 {
-  MDNS.begin("m5stack");
-
   server.on("/", serverHandleRoot);
   server.on("/getco2", serverHandleGetCO2);
+  server.on("/reset", serverHandleReset);
   server.onNotFound(serverHandleNotFound);
   server.begin();
 }
@@ -392,20 +267,17 @@ void setup() {
   setupWiFi();
   setupTime();
   setupTicker();
-  setupAmbient();
   setupServer();
 
-  co2Buffer.LoadCO2Buffer();
+  co2Buffer.LoadCO2Buffer(logFileName);
   draw();
 }
 
 void l_notify(String msg) {
-  const char* host = "notify-api.line.me";
-  const char* token = "ymvMz7EY761RCA9CKKwcZBUSwsWnpde6j1WVHVrwieC";
   WiFiClientSecure client;
   client.setInsecure();
   outputLog(msg);
-  if (!client.connect(host, 443)) {
+  if (!client.connect(lineHost, 443)) {
     outputLog("connect failed");
     delay(2000);
     return;
@@ -413,8 +285,8 @@ void l_notify(String msg) {
   String query = String("message=") + msg;
   String request = String("") +
                "POST /api/notify HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" +
-               "Authorization: Bearer " + token + "\r\n" +
+               "Host: " + lineHost + "\r\n" +
+               "Authorization: Bearer " + lineToken + "\r\n" +
                "Content-Length: " + String(query.length()) +  "\r\n" + 
                "Content-Type: application/x-www-form-urlencoded\r\n\r\n" +
                 query + "\r\n";
@@ -459,14 +331,15 @@ void drawCO2Graph()
 
   float co2Step = (float)(bottom - top) / (float)(yMax - yMin);
   float timeStep = 0.0;
-  if (co2Buffer.Length() > 0)
+  if (co2Buffer.GetSize() > 0)
   {
-    timeStep = (float)(right - left) / co2Buffer.Length();
+    timeStep = (float)(right - left) / co2Buffer.GetSize();
   }
 
-  for (int i = 0; i < co2Buffer.Length(); i++)
+  for (int i = 0; i < co2Buffer.GetSize(); i++)
   {
-    int co2 = co2Buffer.Get(i);
+    auto co2data = co2Buffer.Get(i);
+    int co2 = co2data.co2;
     if (co2 < yMin) co2 = yMin;
     if (co2 > yMax) co2 = yMax;
     
@@ -474,7 +347,7 @@ void drawCO2Graph()
     int timeWidth = timeStep;
     int co2Top = bottom - (int)(co2Step * (float)(co2 - yMin));
     int co2Height = bottom - co2Top;
-    int color = co2 > CO2_OVER_PPM ? RED : (co2 > CO2_WARN_PPM ? 0xFFE0/*YELLOW*/ : BLUE);
+    int color = co2 > CO2_OVER_PPM ? RED : (co2 > CO2_WARN_PPM ? 0xFC9F/*PINK*/ : BLUE);
     M5.Lcd.fillRect(timeLeft, co2Top, timeWidth, co2Height, color);
   }
 
