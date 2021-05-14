@@ -1,5 +1,4 @@
-#ifndef _Buffer_h_
-#define _Buffer_h_
+#pragma once
 
 #include "CO2Data.h"
 
@@ -24,5 +23,3 @@ class Buffer
     void LoadCO2Buffer(String filePath);
     void SaveCO2Buffer(String filePath);
 };
-
-#endif

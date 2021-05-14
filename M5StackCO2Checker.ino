@@ -1,11 +1,11 @@
 #include <M5Stack.h>
-#include <MHZ19.h>
-#include <WiFiClientSecure.h>
-#include <ssl_client.h>
 #include <Ticker.h>
 #include <WebServer.h>
 #include "Buffer.h"
 #include "CO2Data.h"
+#include "CO2Sensor.h"
+#include "Line.h"
+#include "Logger.h"
 
 const char* ssid = "decoNd4l90O1";
 const char* password = "NSiQA7Gm";
@@ -17,7 +17,6 @@ const char* lineToken = "ymvMz7EY761RCA9CKKwcZBUSwsWnpde6j1WVHVrwieC";
 
 #define RX 16
 #define TX 17
-#define INTERVAL 6
 
 #define CO2_CHECK_SPAN_SEC 120
 #define CO2_WARN_PPM 1000
@@ -27,29 +26,24 @@ const char* lineToken = "ymvMz7EY761RCA9CKKwcZBUSwsWnpde6j1WVHVrwieC";
 
 #define SAVE_BUFFER_SPAN 5
 
-MHZ19 myMHZ19;
-HardwareSerial  mySerial(1);
-
+CO2Sensor co2Sensor(SERIAL_8N1, RX, TX);
 Buffer co2Buffer(9 * 30);
+
+Line line(lineHost, lineToken);
 
 Ticker tickerCO2;
 Ticker tickerLCD;
 
-int currentCO2 = 0;
+unsigned int currentCO2 = 0;
 int co2BufferUpdateCount = 0;
 
 WebServer server(80);
 
-void outputLog(String msg)
-{
-  Serial.println(msg);
-}
-
-void logCO2(int co2)
+void logCO2(unsigned int co2)
 {
   String co2Str(co2, DEC);
   String str = "co2 " + co2Str;
-  outputLog(str);
+  Logger::Log(str);
 
   CO2Data data;
   data.co2 = co2;
@@ -75,7 +69,7 @@ void logCO2(int co2)
 
 void checkCO2()
 {
-  currentCO2 = myMHZ19.getCO2();
+  currentCO2 = co2Sensor.GetCO2();
   logCO2(currentCO2);
 
   if (currentCO2 > CO2_OVER_PPM)
@@ -83,7 +77,7 @@ void checkCO2()
     String co2Str(currentCO2, DEC);
     String url = "http://" + WiFi.localIP().toString();
     String str = "CO2 Over : " + co2Str + "\n" + url;
-    l_notify(str);
+    line.Notify(str);
   }
 }
 
@@ -106,6 +100,7 @@ void serverHandleRoot()
 <html lang=\"ja\">\n\
   <head>\n\
     <meta charset=\"utf-8\">\n\
+    <meta http-equiv=\"refresh\" content=\"120\">\n\
     <title>グラフ</title> \n\
   </head>\n\
   <body>\n\
@@ -121,6 +116,7 @@ void serverHandleRoot()
           url: '/getco2',\n\
           dataType: 'json'\n\
         }).then(function(data) {\n\
+          $(\"title\").text(data.currentCO2 + \" ppm\");\n\
           $(\"#currentCO2\").text(data.currentCO2 + \" ppm\");\n\
           var co2labels = [];\n\
           var co2values = [];\n\
@@ -155,17 +151,24 @@ void serverHandleGetCO2()
   String jsonBody = "";
   int count = co2Buffer.GetSize();
   String delim = "";
+  int day = 0;
   int hour = 0;
   for (int i = max(0, count - 60); i < count; i++)
   {
     auto co2data = co2Buffer.Get(i);
     String color = co2data.co2 > CO2_OVER_PPM ? "red" : (co2data.co2 > CO2_WARN_PPM ? "pink" : "blue");
     String label;
+    if (day != co2data.day)
+    {
+      day = co2data.day;
+      label = String(co2data.day) + " ";
+    }
     if (hour != co2data.hour)
     {
       hour = co2data.hour;
-      label = String(co2data.hour);
+      label += String(co2data.hour) + ":";
     }
+    label += String(co2data.min);
     jsonBody += delim + "{\"label\":\"" + label + "\",\"value\":" + String(co2data.co2) + ",\"color\":\"" + color + "\"}";
     delim = ",";
   }
@@ -200,28 +203,16 @@ void setupSpeaker()
   M5.Speaker.mute();
 }
 
-void setupSerial()
-{
-  mySerial.begin(9600,SERIAL_8N1,RX,TX);
-  delay(100);
-}
-
-void setupMHZ19()
-{
-  myMHZ19.begin(mySerial);
-  myMHZ19.autoCalibration(false);
-}
-
 void setupWiFi()
 {
   WiFi.disconnect();
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   while(WiFi.status() != WL_CONNECTED){
-    outputLog("waiting...");
+    Logger::Log("waiting...");
     delay(500);
   }
-  outputLog("connected");
+  Logger::Log("connected");
   delay(2000);
 }
 
@@ -262,8 +253,6 @@ void setupServer()
 void setup() {
   setupPower();
   setupSpeaker();
-  setupSerial();
-  setupMHZ19();
   setupWiFi();
   setupTime();
   setupTicker();
@@ -271,34 +260,6 @@ void setup() {
 
   co2Buffer.LoadCO2Buffer(logFileName);
   draw();
-}
-
-void l_notify(String msg) {
-  WiFiClientSecure client;
-  client.setInsecure();
-  outputLog(msg);
-  if (!client.connect(lineHost, 443)) {
-    outputLog("connect failed");
-    delay(2000);
-    return;
-  }
-  String query = String("message=") + msg;
-  String request = String("") +
-               "POST /api/notify HTTP/1.1\r\n" +
-               "Host: " + lineHost + "\r\n" +
-               "Authorization: Bearer " + lineToken + "\r\n" +
-               "Content-Length: " + String(query.length()) +  "\r\n" + 
-               "Content-Type: application/x-www-form-urlencoded\r\n\r\n" +
-                query + "\r\n";
-  client.print(request);
-  while (client.connected()) {
-    String line = client.readStringUntil('\n');
-    if (line == "\r") {
-      break;
-    }
-  }
-  String line = client.readStringUntil('\n');
-  delay(2000);
 }
 
 void drawBattery()

@@ -1,5 +1,4 @@
-#ifndef _CO2Data_h_
-#define _CO2Data_h_
+#pragma once
 
 #include <M5Stack.h>
 
@@ -19,5 +18,3 @@ struct CO2Data
   void SerializeToFile(File& f);
   void DeserializeFromFile(File& f);
 };
-
-#endif
