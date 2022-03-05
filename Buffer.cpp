@@ -49,23 +49,25 @@ void Buffer::Clear()
   _list = new CO2Data[_maxSize];
 }
 
-void Buffer::Append(CO2Data value)
+void Buffer::Append(CO2Data& value)
 {
-  unsigned int realIndex = (_startPos + _size) % _maxSize;
-  _list[realIndex] = value;
-  
-  if (_size >= _maxSize)
-  {
+  unsigned int nextPos = 0;
+  if (_size < _maxSize) {
+    _startPos = 0;
+    nextPos = _size;
+    _size++;
+  }
+  else {
+    nextPos = _startPos + 1;
+    if (nextPos >= _maxSize) {
+      nextPos = 0;
+    }
     _startPos++;
-    if (_startPos >= _maxSize)
-    {
+    if (_startPos >= _maxSize) {
       _startPos = 0;
     }
   }
-  else
-  {
-    _size++;
-  }
+  _list[nextPos] = value;
 }
 
 unsigned int Buffer::GetSize()

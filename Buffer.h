@@ -17,7 +17,7 @@ class Buffer
   public:
     Buffer(unsigned int maxSize);
     void Clear();
-    void Append(CO2Data value);
+    void Append(CO2Data& value);
     unsigned int GetSize();
     CO2Data Get(unsigned int index);
     void LoadCO2Buffer(String filePath);

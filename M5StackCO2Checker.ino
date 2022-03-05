@@ -72,6 +72,11 @@ void checkCO2()
   currentCO2 = co2Sensor.GetCO2();
   logCO2(currentCO2);
 
+  if (currentCO2 > CO2_WARN_PPM)
+  {
+    show();
+  }
+
   if (currentCO2 > CO2_OVER_PPM)
   {
     String co2Str(currentCO2, DEC);
@@ -330,12 +335,16 @@ void draw()
   drawCO2Graph();
 }
 
+void show() {
+  lcdOn();
+  draw();
+  setupLCDTicker();
+}
+
 void loop() {
   if (M5.BtnB.wasPressed())
   {
-    lcdOn();
-    draw();
-    setupLCDTicker();
+    show();
   }
   
   M5.update();
